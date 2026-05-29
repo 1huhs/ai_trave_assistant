@@ -222,6 +222,42 @@ class SmartAgent:
         lines.append("=" * 50)
         return "\n".join(lines)
 
+   # ────────────────── 流式推理 ──────────────────
+
+    async def astream(self, input_data):
+        """
+        异步流式执行 Agent 推理（逐 chunk yield 给 FastAPI SSE）
+        :param input_data: str — 用户输入
+        :yield: str — 流式文本 chunk（每次返回一个字/词）
+        :调用方: api.py → chat_stream() 端点
+        """
+        self.execution_trace = []
+        self.execution_trace.append({"step": "INPUT", "content": input_data})
+        self.save_user_history_message(input_data)
+
+        full_response = ""
+        start_time = time.perf_counter()
+        try:
+            async for chunk in self.agent.astream({"messages": self.history_message}):
+                logger.info("收到 Chunk|user_id=%s", self.user_id)
+                for step_data in chunk.values():
+                    if "messages" in step_data:
+                        for msg in step_data["messages"]:
+                            if msg.content:
+                                full_response += msg.content
+                                yield msg.content
+        except Exception as e:
+            logger.error("流式处理用户请求时出错|user_id=%s|error=%s", self.user_id, e, exc_info=True)
+            yield self.fallback_message
+
+        async_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("流式处理用户请求完成|user_id=%s|async_ms=%.0f", self.user_id, async_ms)
+
+        if full_response:
+            self.save_assistant_history_message(full_response)
+            long_memory = self.extract_memory(user=input_data, ai=full_response)
+            self.memory.save_memory(long_memory)
+
     # ──────────── 记忆提取 ────────────
 
     def extract_memory(self, user, ai):
